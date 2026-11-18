@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGate — the lounge only Agent ID holders can enter</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: #0b0e14; color: #e8ecf3; }
+  main { max-width: 560px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 34px; margin: 8px 0 4px; letter-spacing: .5px; }
+  h1 .gate { color: #f0b90b; }
+  .tag { color: #9aa7bd; margin: 0 0 24px; line-height: 1.5; }
+  .card { background: #131826; border: 1px solid #232c42; border-radius: 14px;
+          padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; color: #c8d2e4; text-transform: uppercase;
+             letter-spacing: 1px; }
+  .big { font-size: 40px; font-weight: 700; }
+  .muted { color: #9aa7bd; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .stat { flex: 1 1 120px; }
+  .stat .v { font-size: 24px; font-weight: 700; }
+  .stat .k { color: #9aa7bd; font-size: 13px; }
+  button { background: #f0b90b; color: #131313; border: 0; border-radius: 10px;
+           padding: 13px 20px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
+  button:disabled { background: #2a3350; color: #74809a; cursor: not-allowed; }
+  button.secondary { background: #1d2740; color: #e8ecf3; border: 1px solid #2e3c5f; }
+  .status { min-height: 22px; font-size: 14px; margin-top: 10px; }
+  .ok { color: #4ade80; } .bad { color: #f87171; } .warn { color: #fbbf24; }
+  .addr { font-family: ui-monospace, monospace; font-size: 12.5px; word-break: break-all; }
+  footer { color: #5f6c85; font-size: 12.5px; line-height: 1.6; margin-top: 28px; }
+  a { color: #f0b90b; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Agent<span class="gate">Gate</span></h1>
+  <p class="tag">A members-only lounge on BNB Chain. The door checks your
+    <b>Agent ID</b> on-chain — no Agent ID, no entry. Holders check in once a day,
+    build a streak, and earn a soulbound badge after 3 check-ins.</p>
+
+  <div class="card">
+    <h2>Members inside</h2>
+    <div class="big" id="memberCount">—</div>
+    <div class="muted">unique Agent ID addresses that have checked in</div>
+  </div>
+
+  <div class="card">
+    <h2>Your key</h2>
+    <div id="walletArea">
+      <button id="connectBtn">Connect wallet</button>
+      <div class="status" id="connectStatus"></div>
+    </div>
+    <div id="memberArea" style="display:none">
+      <div class="row">
+        <div class="stat"><div class="v" id="stTotal">—</div><div class="k">check-ins</div></div>
+        <div class="stat"><div class="v" id="stStreak">—</div><div class="k">day streak</div></div>
+        <div class="stat"><div class="v" id="stBadge">—</div><div class="k">badge</div></div>
+      </div>
+      <p class="status" id="gateStatus"></p>
+      <p><button id="checkInBtn">Check in today</button></p>
+      <p><button id="badgeBtn" class="secondary">Claim badge (3 check-ins)</button></p>
+      <div class="status" id="txStatus"></div>
+      <p class="addr muted" id="myAddr"></p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>How it works</h2>
+    <p class="muted" style="line-height:1.6;margin:0">
+      1. Your wallet's Agent ID is read directly from the SPACE ID registry
+      contract — nothing is taken on trust.<br>
+      2. <span class="addr">checkIn()</span> records your day on-chain. One per
+      UTC day; miss a day and the streak restarts.<br>
+      3. After 3 lifetime check-ins, <span class="addr">claimBadge()</span> mints
+      your AgentGate Badge. It is soulbound: it can never be sold or moved.<br>
+      4. The contracts hold no user funds, take no approvals, and charge nothing
+      but the network's own gas.
+    </p>
+  </div>
+
+  <footer>
+    AgentGate is an independent project built for the Binance Agent ID Hackathon.
+    It is not affiliated with Binance. Contracts are open-source and verified;
+    every transaction is confirmed by you in your own wallet.
+    <span id="contractLinks"></span>
+  </footer>
+</main>
+
+<script src="config.js"></script>
+<script>
+"use strict";
+const CFG = window.AGENTGATE_CONFIG;
+const SEL = {
+  balanceOf: "0x70a08231", hasAgentId: "0x4eab3ef2", isMember: "0xa230c524",
+  statsOf: "0x15cfc405", uniqueMembers: "0xcfe9c538", badgeThreshold: "0xcf0ed3e5",
+  checkIn: "0x183ff085", claimBadge: "0x56e56942"
+};
+const $ = (id) => document.getElementById(id);
+let account = null;
+
+function padAddr(a) { return a.toLowerCase().replace(/^0x/, "").padStart(64, "0"); }
+function callData(sel, addr) { return addr ? sel + padAddr(addr) : sel; }
+function words(hex) {
+  const out = []; const s = hex.replace(/^0x/, "");
+  for (let i = 0; i + 64 <= s.length; i += 64) out.push(BigInt("0x" + s.slice(i, i + 64)));
+  return out;
+}
+async function rpcCall(to, data) {
+  const r = await fetch(CFG.readRpc, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call",
+      params: [{ to, data }, "latest"] })
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || "rpc error");
+  return j.result;
+}
+function utcDayNow() { return Math.floor(Date.now() / 86400000); }
+
+async function refreshMemberCount() {
+  if (!CFG.gateAddress) { $("memberCount").textContent = "—"; return; }
+  try {
+    const res = await rpcCall(CFG.gateAddress, SEL.uniqueMembers);
+    $("memberCount").textContent = words(res)[0].toString();
+  } catch (e) { $("memberCount").textContent = "—"; }
+}
+
+async function refreshMine() {
+  if (!account) return;
+  $("myAddr").textContent = account;
+  try {
+    const held = words(await rpcCall(CFG.registryAddress, callData(SEL.balanceOf, account)))[0];
+    if (!CFG.gateAddress) {
+      $("gateStatus").innerHTML = held > 0n
+        ? '<span class="warn">Agent ID detected. Contracts not deployed yet — check-in opens at launch.</span>'
+        : '<span class="bad">This wallet holds no Agent ID.</span>';
+      $("checkInBtn").disabled = true; $("badgeBtn").disabled = true;
+      return;
+    }
+    const st = words(await rpcCall(CFG.gateAddress, callData(SEL.statsOf, account)));
+    const [total, streak, lastDay] = st;
+    $("stTotal").textContent = total.toString();
+    $("stStreak").textContent = streak.toString();
+    let badge = "not yet";
+    if (CFG.badgeAddress) {
+      const b = words(await rpcCall(CFG.badgeAddress, callData(SEL.balanceOf, account)))[0];
+      if (b > 0n) badge = "claimed";
+    }
+    $("stBadge").textContent = badge;
+    const today = BigInt(utcDayNow());
+    if (held === 0n) {
+      $("gateStatus").innerHTML = '<span class="bad">This wallet holds no Agent ID — the gate stays closed.</span>';
+      $("checkInBtn").disabled = true;
+    } else if (lastDay === today) {
+      $("gateStatus").innerHTML = '<span class="ok">Agent ID verified. You are checked in for today.</span>';
+      $("checkInBtn").disabled = true;
+    } else {
+      $("gateStatus").innerHTML = '<span class="ok">Agent ID verified. The gate is open.</span>';
+      $("checkInBtn").disabled = false;
+    }
+    $("badgeBtn").disabled = !(total >= 3n && badge !== "claimed");
+  } catch (e) {
+    $("gateStatus").innerHTML = '<span class="bad">Could not read chain state. Try again.</span>';
+  }
+}
+
+async function ensureChain() {
+  const id = await window.ethereum.request({ method: "eth_chainId" });
+  if (id !== CFG.chainIdHex) {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain", params: [{ chainId: CFG.chainIdHex }] });
+  }
+}
+async function sendTx(data) {
+  await ensureChain();
+  const hash = await window.ethereum.request({
+    method: "eth_sendTransaction",
+    params: [{ from: account, to: CFG.gateAddress, data }]
+  });
+  return hash;
+}
+
+$("connectBtn").addEventListener("click", async () => {
+  if (!window.ethereum) {
+    $("connectStatus").innerHTML =
+      '<span class="bad">No EVM wallet found in this browser. Open this page inside your wallet app browser (e.g. Binance Wallet) or a wallet extension.</span>';
+    return;
+  }
+  try {
+    await ensureChain();
+    const accs = await window.ethereum.request({ method: "eth_requestAccounts" });
+    account = accs[0];
+    $("walletArea").style.display = "none";
+    $("memberArea").style.display = "block";
+    await refreshMine();
+  } catch (e) {
+    $("connectStatus").innerHTML = '<span class="bad">Connection failed: ' +
+      (e.message || e) + "</span>";
+  }
+});
+$("checkInBtn").addEventListener("click", async () => {
+  $("txStatus").textContent = "Waiting for your confirmation…";
+  try {
+    const h = await sendTx(SEL.checkIn);
+    $("txStatus").innerHTML = 'Sent: <a target="_blank" href="' + CFG.explorer +
+      "/tx/" + h + '">' + h.slice(0, 18) + "…</a>";
+    setTimeout(async () => { await refreshMine(); await refreshMemberCount(); }, 4000);
+  } catch (e) { $("txStatus").innerHTML = '<span class="bad">' + (e.message || e) + "</span>"; }
+});
+$("badgeBtn").addEventListener("click", async () => {
+  $("txStatus").textContent = "Waiting for your confirmation…";
+  try {
+    const h = await sendTx(SEL.claimBadge);
+    $("txStatus").innerHTML = 'Sent: <a target="_blank" href="' + CFG.explorer +
+      "/tx/" + h + '">' + h.slice(0, 18) + "…</a>";
+    setTimeout(refreshMine, 4000);
+  } catch (e) { $("txStatus").innerHTML = '<span class="bad">' + (e.message || e) + "</span>"; }
+});
+
+if (CFG.gateAddress) {
+  $("contractLinks").innerHTML = ' Gate: <a target="_blank" href="' + CFG.explorer +
+    "/address/" + CFG.gateAddress + '">' + CFG.gateAddress.slice(0, 10) + "…</a>";
+} else {
+  $("contractLinks").textContent = " Contracts deploy shortly.";
+}
+refreshMemberCount();
+</script>
+</body>
+</html>
